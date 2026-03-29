@@ -52,7 +52,7 @@ class T2TDataCollator():
             input_ids, attention_mask = trim_batch(input_ids, pad_token_id, attention_mask=attention_mask)
             target_ids = trim_batch(target_ids, pad_token_id)
         
-        if self.model_type == "t5":
+        if self.model_type in ["t5", "mt5"]:
             lm_labels = target_ids.clone()
             decoder_input_ids = self._shift_right_t5(lm_labels)
             if self.mode == 'training':

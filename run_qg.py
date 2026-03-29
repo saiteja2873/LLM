@@ -27,6 +27,7 @@ from utils import freeze_embeds, assert_not_all_frozen
 MODEL_TYPE_TO_TOKENIZER = {
     "t5": T5Tokenizer,
     "bart": BartTokenizer,
+    "mt5": AutoTokenizer,
 }
 
 
