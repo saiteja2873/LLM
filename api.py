@@ -4,9 +4,9 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 app = FastAPI()
 
-# Load model
-tokenizer = AutoTokenizer.from_pretrained("valhalla/t5-base-e2e-qg")
-model = AutoModelForSeq2SeqLM.from_pretrained("valhalla/t5-base-e2e-qg")
+# Load your trained model
+tokenizer = AutoTokenizer.from_pretrained("./my_model")
+model = AutoModelForSeq2SeqLM.from_pretrained("./my_model")
 
 class InputText(BaseModel):
     text: str
@@ -15,8 +15,8 @@ class InputText(BaseModel):
 def generate_questions(data: InputText):
     prompt = "generate questions: " + data.text
 
-    inputs = tokenizer(prompt, return_tensors="pt")
-    outputs = model.generate(**inputs, max_length=64)
+    inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
+    outputs = model.generate(**inputs, max_length=128, num_beams=4)
 
     result = tokenizer.decode(outputs[0], skip_special_tokens=True)
 

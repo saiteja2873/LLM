@@ -1,2 +1,7 @@
 *.pt
 __pycache__
+venv/
+my_model/
+*.zip
+.ipynb_checkpoints/
+t5_qg_tokenizer/
