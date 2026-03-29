@@ -4,9 +4,13 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import torch
-import nlp
+import nltk
+from datasets import load_dataset, Dataset
 from transformers import T5Tokenizer, BartTokenizer, HfArgumentParser
 
+# Download punkt for sentence tokenization
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +25,8 @@ class DataTrainingArguments:
     )
     model_type: str = field(metadata={"help": "One of 't5', 'bart'"})
     dataset_path: Optional[str] = field(
-        default="data/squad_multitask",
-        metadata={"help": "Path for dataset directory"}, 
+        default="squad",
+        metadata={"help": "Hugging Face dataset name (default: squad)"}, 
     )
     train_file_name: Optional[str] = field(
         default=None,
@@ -37,8 +41,8 @@ class DataTrainingArguments:
         metadata={"help": "For multitask dataset valid split should contain only qg task or all tasks."}
     )
     qg_format: Optional[str] = field(
-        default='highlight_qg_format',
-        metadata={"help": "How to format inputs for que generation, 'highlight_qg_format' or 'prepend_qg_format'"}, 
+        default='highlight',
+        metadata={"help": "How to format inputs for que generation, 'highlight' or 'prepend'"}, 
     )
     max_source_length: Optional[int] = field(
         default=512,
@@ -48,6 +52,114 @@ class DataTrainingArguments:
         default=32,
         metadata={"help": "Max input length for the target text"},
     )
+
+
+def _get_correct_alignment(context, answer):
+    """Some original examples in SQuAD have indices wrong by 1 or 2 characters. We test and fix this here."""
+    gold_text = answer['text'][0] if isinstance(answer['text'], list) else answer['text']
+    start_idx = answer['answer_start'][0] if isinstance(answer['answer_start'], list) else answer['answer_start']
+    end_idx = start_idx + len(gold_text)
+    
+    if context[start_idx:end_idx] == gold_text:
+        return start_idx, end_idx
+    elif context[start_idx-1:end_idx-1] == gold_text:
+        return start_idx-1, end_idx-1
+    elif context[start_idx-2:end_idx-2] == gold_text:
+        return start_idx-2, end_idx-2
+    else:
+        return start_idx, end_idx  # Return original if no fix found
+
+
+def process_squad_to_qg_format(dataset, qg_format, task):
+    """Process SQuAD dataset into question generation format."""
+    processed_examples = []
+    
+    # Group examples by context for e2e_qg task
+    if task == 'e2e_qg':
+        context_to_questions = {}
+        for example in dataset:
+            context = example['context'].strip()
+            question = example['question'].strip()
+            if context not in context_to_questions:
+                context_to_questions[context] = []
+            context_to_questions[context].append(question)
+        
+        for context, questions in context_to_questions.items():
+            source_text = f"generate questions: {context}"
+            target_text = " {{sep_token}} ".join(questions) + " {{sep_token}}"
+            processed_examples.append({
+                "source_text": source_text,
+                "target_text": target_text,
+                "task": "e2e_qg"
+            })
+    else:
+        for example in dataset:
+            context = example['context'].strip()
+            question = example['question'].strip()
+            answers = example['answers']
+            
+            if len(answers['text']) == 0:
+                continue
+                
+            answer_text = answers['text'][0].strip()
+            answer = {'text': answer_text, 'answer_start': answers['answer_start'][0]}
+            
+            # QA task
+            if task in ['qa', 'multi']:
+                qa_source = f"question: {question}  context: {context}"
+                qa_target = answer_text
+                processed_examples.append({
+                    "source_text": qa_source,
+                    "target_text": qa_target,
+                    "task": "qa"
+                })
+            
+            # QG task
+            if task in ['qg', 'multi']:
+                if qg_format == "prepend":
+                    qg_source = f"answer: {answer_text}  context: {context}"
+                else:  # highlight format
+                    start_pos, end_pos = _get_correct_alignment(context, answer)
+                    qg_source = f"generate question: {context[:start_pos]} {{hl_token}} {answer_text} {{hl_token}} {context[end_pos:]}"
+                
+                processed_examples.append({
+                    "source_text": qg_source,
+                    "target_text": question,
+                    "task": "qg"
+                })
+            
+            # Answer extraction task
+            if task in ['ans_ext', 'multi']:
+                sents = nltk.sent_tokenize(context)
+                positions = []
+                prev_end = 0
+                for i, sent in enumerate(sents):
+                    if i == 0:
+                        start, end = 0, len(sent)
+                    else:
+                        start, end = prev_end + 1, prev_end + len(sent) + 1
+                    prev_end = end
+                    positions.append({'start': start, 'end': end})
+                
+                ans_start = answer['answer_start']
+                for i, pos in enumerate(positions):
+                    if ans_start >= pos['start'] and ans_start < pos['end']:
+                        # Build input with highlighted sentence
+                        input_parts = ["extract answers:"]
+                        for j, sent in enumerate(sents):
+                            if i == j:
+                                input_parts.append(f"{{hl_token}} {sent} {{hl_token}}")
+                            else:
+                                input_parts.append(sent)
+                        
+                        processed_examples.append({
+                            "source_text": " ".join(input_parts),
+                            "target_text": f"{answer_text} {{sep_token}}",
+                            "task": "ans_ext"
+                        })
+                        break
+    
+    return Dataset.from_list(processed_examples)
 
 class DataProcessor:
     def __init__(self, tokenizer, model_type="t5", max_source_length=512, max_target_length=32):
@@ -85,18 +197,16 @@ class DataProcessor:
   
     # tokenize the examples
     def _convert_to_features(self, example_batch):
-        source_encoding = self.tokenizer.batch_encode_plus(
+        source_encoding = self.tokenizer(
             example_batch['source_text'],
             max_length=self.max_source_length,
             padding='max_length',
-            pad_to_max_length=True,
             truncation=True, 
         )
-        target_encoding = self.tokenizer.batch_encode_plus(
+        target_encoding = self.tokenizer(
             example_batch['target_text'],
             max_length=self.max_target_length,
             padding='max_length',
-            pad_to_max_length=True,
             truncation=True, 
         )
 
@@ -152,8 +262,17 @@ def main():
     
     tokenizer.add_tokens(['<sep>', '<hl>'])
     
-    train_dataset = nlp.load_dataset(data_args.dataset_path, name=data_args.qg_format, split=nlp.Split.TRAIN)
-    valid_dataset = nlp.load_dataset(data_args.dataset_path, name=data_args.qg_format, split=nlp.Split.VALIDATION)
+    # Load SQuAD dataset directly from Hugging Face
+    logger.info("Loading SQuAD dataset from Hugging Face...")
+    raw_train = load_dataset("squad", split="train")
+    raw_valid = load_dataset("squad", split="validation")
+    
+    # Process into QG format  
+    logger.info(f"Processing data for task: {data_args.task}, format: {data_args.qg_format}")
+    train_dataset = process_squad_to_qg_format(raw_train, data_args.qg_format, data_args.task)
+    valid_dataset = process_squad_to_qg_format(raw_valid, data_args.qg_format, data_args.task)
+    
+    logger.info(f"Train examples: {len(train_dataset)}, Valid examples: {len(valid_dataset)}")
 
     processor = DataProcessor(
         tokenizer,
@@ -162,20 +281,30 @@ def main():
         max_target_length=data_args.max_target_length
     )
 
-    train_dataset = train_dataset.filter(TASK_TO_FILTER_FN[data_args.task])
     if data_args.task == 'multi' and data_args.valid_for_qg_only:
         logger.info("processing valid data only for qg task")
         valid_dataset = valid_dataset.filter(filter_qg)
-    else:
-        valid_dataset = valid_dataset.filter(TASK_TO_FILTER_FN[data_args.task])
 
     
     train_dataset = processor.process(train_dataset)
     valid_dataset = processor.process(valid_dataset)
 
-    columns = ["source_ids", "target_ids", "attention_mask"]
-    train_dataset.set_format(type='torch', columns=columns)
-    valid_dataset.set_format(type='torch', columns=columns)
+    # Convert to list of dicts with torch tensors for proper saving
+    def dataset_to_torch_list(dataset):
+        torch_data = []
+        for i in range(len(dataset)):
+            item = dataset[i]
+            torch_data.append({
+                'source_ids': torch.tensor(item['source_ids']),
+                'target_ids': torch.tensor(item['target_ids']),
+                'attention_mask': torch.tensor(item['attention_mask']),
+            })
+        return torch_data
+
+    logger.info("Converting train dataset to torch format...")
+    train_torch = dataset_to_torch_list(train_dataset)
+    logger.info("Converting valid dataset to torch format...")
+    valid_torch = dataset_to_torch_list(valid_dataset)
 
     if data_args.train_file_name is None:
         train_file_name = f"train_data_{data_args.task}_{data_args.qg_format}_{data_args.model_type}.pt"
@@ -187,10 +316,10 @@ def main():
         train_path = os.path.join("data", data_args.train_file_name)
         valid_path = os.path.join("data", data_args.valid_file_name)
     
-    torch.save(train_dataset, train_path)
+    torch.save(train_torch, train_path)
     logger.info(f"saved train dataset at {train_path}")
     
-    torch.save(valid_dataset, valid_path)
+    torch.save(valid_torch, valid_path)
     logger.info(f"saved validation dataset at {valid_path}")
     
     tokenizer_path = f"{data_args.model_type}_qg_tokenizer"

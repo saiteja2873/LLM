@@ -25,7 +25,7 @@ import os
 import nltk
 nltk.download('punkt')
 
-import nlp
+import datasets as nlp
 
 
 _CITATION = """\

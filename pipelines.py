@@ -59,23 +59,39 @@ class QGPipeline:
         else:
             qg_examples = self._prepare_inputs_for_qg_from_answers_hl(sents, answers)
         
-        qg_inputs = [example['source_text'] for example in qg_examples]
+        qg_inputs = [
+            ex.get('source_text') 
+            for ex in qg_examples 
+            if ex.get('source_text')
+        ]
+
+        if not qg_inputs:   # ✅ critical fix
+            return []
+
         questions = self._generate_questions(qg_inputs)
+
+        if not questions:   # ✅ safety
+            return []
         output = [{'answer': example['answer'], 'question': que} for example, que in zip(qg_examples, questions)]
         return output
     
     def _generate_questions(self, inputs):
+        if not inputs or len(inputs) == 0:   # ✅ critical fix
+            return []
+    
         inputs = self._tokenize(inputs, padding=True, truncation=True)
-        
+    
+        if inputs["input_ids"].numel() == 0:   # ✅ extra safety
+            return []
+    
         outs = self.model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
             max_length=32,
             num_beams=4,
         )
-        
-        questions = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
-        return questions
+    
+        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
     
     def _extract_answers(self, context):
         sents, inputs = self._prepare_inputs_for_ans_extraction(context)

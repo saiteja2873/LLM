@@ -162,11 +162,23 @@ def main(args_file=None):
         freeze_embeds(model)
         assert_not_all_frozen(model)
 
+    # Simple Dataset wrapper for list of dicts
+    class ListDataset(torch.utils.data.Dataset):
+        def __init__(self, data):
+            self.data = data
+        def __len__(self):
+            return len(self.data)
+        def __getitem__(self, idx):
+            return self.data[idx]
+
     # Get datasets
     logger.info('loading dataset')
     
-    train_dataset = torch.load(data_args.train_file_path) if training_args.do_train else None
-    valid_dataset = torch.load(data_args.valid_file_path) if training_args.do_eval else None
+    train_data = torch.load(data_args.train_file_path, weights_only=False) if training_args.do_train else None
+    valid_data = torch.load(data_args.valid_file_path, weights_only=False) if training_args.do_eval else None
+    
+    train_dataset = ListDataset(train_data) if train_data is not None else None
+    valid_dataset = ListDataset(valid_data) if valid_data is not None else None
     
     logger.info('finished loading dataset')
 
@@ -175,8 +187,11 @@ def main(args_file=None):
         tokenizer=tokenizer,
         model_type=model_args.model_type,
         mode="training",
-        using_tpu=training_args.tpu_num_cores is not None
+        using_tpu=False
     )
+
+    # Disable automatic column removal (we handle this in the data collator)
+    training_args.remove_unused_columns = False
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -185,7 +200,6 @@ def main(args_file=None):
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
         data_collator=data_collator,
-        prediction_loss_only=True,
         label_smoothing=model_args.label_smoothing
     )
 
@@ -194,13 +208,12 @@ def main(args_file=None):
 
     # Training
     if training_args.do_train:
-        trainer.train(
-            model_path=model_args.model_name_or_path if os.path.isdir(model_args.model_name_or_path) else None
-        )
+        resume_checkpoint = model_args.model_name_or_path if os.path.isdir(model_args.model_name_or_path) else None
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
         trainer.save_model()
         # For convenience, we also re-save the tokenizer to the same directory,
         # so that you can share your model easily on huggingface.co/models =)
-        if trainer.is_world_master():
+        if trainer.is_world_process_zero():
             tokenizer.save_pretrained(training_args.output_dir)
 
     # Evaluation

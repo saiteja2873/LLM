@@ -14,6 +14,17 @@ def trim_batch(
         return (input_ids[:, keep_column_mask], attention_mask[:, keep_column_mask])
 
 
+def get_tensor(example, *keys):
+    """Get tensor from example, trying multiple possible key names."""
+    for key in keys:
+        if key in example:
+            val = example[key]
+            if isinstance(val, torch.Tensor):
+                return val
+            return torch.tensor(val)
+    raise KeyError(f"None of the keys {keys} found in example with keys: {list(example.keys())}")
+
+
 # prepares lm_labels from target_ids, returns examples with keys as expected by the forward method
 # this is necessacry because the trainer directly passes this dict as arguments to the model
 # so make sure the keys match the parameter names of the forward method
@@ -30,9 +41,9 @@ class T2TDataCollator():
         Returns:
             A dictionary of tensors
         """
-        input_ids = torch.stack([example['source_ids'] for example in batch])
-        target_ids = torch.stack([example['target_ids'] for example in batch])
-        attention_mask = torch.stack([example['attention_mask'] for example in batch])
+        input_ids = torch.stack([get_tensor(example, 'source_ids', 'input_ids') for example in batch])
+        target_ids = torch.stack([get_tensor(example, 'target_ids', 'labels') for example in batch])
+        attention_mask = torch.stack([get_tensor(example, 'attention_mask') for example in batch])
 
         pad_token_id = self.tokenizer.pad_token_id
         
